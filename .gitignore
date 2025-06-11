@@ -96,3 +96,7 @@ venv*
 
 # environment manager:
 .mise.toml
+
+./telegram_bot
+./.cursor
+./.github
