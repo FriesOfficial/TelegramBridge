@@ -44,16 +44,6 @@ TELEGRAM_ADMIN_USER_IDS=admin1_id,admin2_id
 
 To obtain group IDs and personal IDs, you can use [@GetTheirIDBot](https://t.me/GetTheirIDBot):
 
-1. **Getting your personal ID**:
-   - Search for and open [@GetTheirIDBot](https://t.me/GetTheirIDBot) in Telegram
-   - Send any message to the bot
-   - The bot will reply with your personal ID
-
-2. **Getting a group ID**:
-   - Add [@GetTheirIDBot](https://t.me/GetTheirIDBot) to your admin group
-   - Send the `/id` command in the group
-   - The bot will reply with the group's ID
-   - After getting the ID, you can remove the bot from the group
 
 Record these IDs and configure `TELEGRAM_ADMIN_GROUP_ID` and `TELEGRAM_ADMIN_USER_IDS` correctly in your `.env` file.
 
