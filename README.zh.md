@@ -2,7 +2,7 @@
 
 基于 Python-Telegram-Bot 构建的专业双向客服系统，为 Telegram 用户和客服人员提供实时双向通信的解决方案。
 
-[English Documentation](README.md)
+[English Documentation](README.en.md)
 
 ## 功能特点
 
@@ -39,6 +39,23 @@ TELEGRAM_TOKEN=从botfather获取的机器人令牌
 TELEGRAM_ADMIN_GROUP_ID=管理群组ID
 TELEGRAM_ADMIN_USER_IDS=管理员1ID,管理员2ID
 ```
+
+### 获取 Telegram ID
+
+要获取群组 ID 和个人 ID，可以使用 [@GetTheirIDBot](https://t.me/GetTheirIDBot) 机器人：
+
+1. **获取个人 ID**：
+   - 在 Telegram 中搜索并打开 [@GetTheirIDBot](https://t.me/GetTheirIDBot)
+   - 向机器人发送任意消息
+   - 机器人将回复您的个人 ID
+
+2. **获取群组 ID**：
+   - 将 [@GetTheirIDBot](https://t.me/GetTheirIDBot) 添加到您的管理群组
+   - 在群组中发送 `/id` 命令
+   - 机器人将回复群组的 ID
+   - 获取 ID 后，您可以将机器人从群组中移除
+
+记录这些 ID 并在 `.env` 文件中正确配置 `TELEGRAM_ADMIN_GROUP_ID` 和 `TELEGRAM_ADMIN_USER_IDS`。
 
 ## 配置说明
 
