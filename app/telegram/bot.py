@@ -2,12 +2,8 @@
 """
 Telegram Bot 客服系统实现
 """
-import os
-import random
-import time
 import logging
 from datetime import datetime, timedelta
-from string import ascii_letters as letters
 
 import telegram
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -31,10 +27,16 @@ from app.models.message_map import MessageMap
 from app.models.user import User
 from app.config import telegram_config
 from app.telegram.callbacks import (
-    process_callback_query,
-    process_callback_vcode,
-    generate_verification_code,
-    create_verification_keyboard
+    process_callback_query
+)
+from app.telegram.file_handlers import (
+    handle_file_sharing,
+    send_media_to_user,
+    get_reply_to_message_id,
+    delete_message_later
+)
+from app.telegram.utils import (
+    create_or_get_user_topic
 )
 
 # 设置日志
@@ -236,68 +238,15 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if str(user.id) in telegram_config.admin_user_ids:
         admin_help = (
             "\n\n管理员命令 (仅在管理群组中有效):\n"
-            "/clear - 清除当前话题\n"
-            "/broadcast - 向所有用户广播消息 (需回复要广播的消息)"
+            "/clear - 清除当前话题"
         )
         help_text += admin_help
     
     await update.message.reply_text(help_text)
 
 
-async def check_human(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """检查用户是否是人类"""
-    user = update.effective_user
-    if context.user_data.get("is_human", False) == False:
-        if context.user_data.get("is_human_error_time", 0) > time.time() - 120:
-            # 2分钟内禁言
-            await update.message.reply_html("你已经被禁言,请稍后再尝试。")
-            return False
-            
-        # 检查是否有验证码图片
-        if not os.path.exists("./assets/imgs"):
-            os.makedirs("./assets/imgs", exist_ok=True)
-            
-        # 如果没有验证码图片，跳过验证
-        files = os.listdir("./assets/imgs")
-        if not files:
-            context.user_data["is_human"] = True
-            return True
-            
-        # 生成验证码
-        code, identifier = await generate_verification_code()
-        
-        # 保存验证码信息到用户上下文
-        context.user_data["verification"] = {
-            "code": code,
-            "identifier": identifier
-        }
-        
-        # 创建验证码键盘
-        keyboard = await create_verification_keyboard(code, identifier)
-        
-        # 发送验证消息
-        sent = await update.message.reply_text(
-            f"{mention_html(user.id, user.first_name)} 请选择正确的验证码",
-            reply_markup=keyboard,
-            parse_mode="HTML"
-        )
-        
-        # 60秒后删除消息
-        await delete_message_later(60, sent.chat.id, sent.message_id, context)
-        return False
-    return True
-
-
 async def forwarding_message_u2a(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """将用户消息转发到管理群组"""
-    if not telegram_config.disable_captcha:
-        if not await check_human(update, context):
-            return
-    if telegram_config.message_interval:
-        if context.user_data.get("last_message_time", 0) > time.time() - telegram_config.message_interval:
-            await update.message.reply_html("请不要频繁发送消息。")
-            return
-        context.user_data["last_message_time"] = time.time()
     user = update.effective_user
     db_user = update_user_db(user)
     chat_id = telegram_config.admin_group_id
@@ -561,41 +510,6 @@ async def clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
-async def _broadcast(context: ContextTypes.DEFAULT_TYPE):
-    """广播消息给所有用户"""
-    users = db.query(User).all()
-    msg_id, chat_id = context.job.data.split("_")
-    success = 0
-    failed = 0
-    for u in users:
-        try:
-            chat = await context.bot.get_chat(u.user_id)
-            await chat.send_copy(chat_id, msg_id)
-            success += 1
-        except Exception as e:
-            failed += 1
-
-
-async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """广播消息"""
-    user = update.effective_user
-    if not user.id in telegram_config.admin_user_ids:
-        await update.message.reply_html("你没有权限执行此操作。")
-        return
-
-    if not update.message.reply_to_message:
-        await update.message.reply_html(
-            "这条指令需要回复一条消息，被回复的消息将被广播。"
-        )
-        return
-
-    context.job_queue.run_once(
-        _broadcast,
-        0,
-        data=f"{update.message.reply_to_message.id}_{update.effective_chat.id}",
-    )
-
-
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     """处理错误"""
     logger.error(f"Exception while handling an update: {context.error} ")
@@ -741,16 +655,9 @@ def setup_handlers(application):
     application.add_handler(
         CommandHandler("clear", clear, filters.Chat([int(telegram_config.admin_group_id)]))
     )
-    application.add_handler(
-        CommandHandler("broadcast", broadcast, filters.Chat([int(telegram_config.admin_group_id)]))
-    )
     
     # 回调处理
     import re
-    # 验证码回调处理
-    application.add_handler(
-        CallbackQueryHandler(process_callback_vcode, pattern=re.compile(r"^vcode_"))
-    )
     
     # 标记已读回调处理 - 确保这个模式匹配read_数字格式
     application.add_handler(
@@ -874,13 +781,14 @@ async def forward_to_admin_group(update: Update, context: ContextTypes.DEFAULT_T
         logger.info(f"正在为用户 {user.id} 创建或获取话题...")
         logger.info(f"管理群组ID: {telegram_config.admin_group_id}")
         
-        topic_id = await create_or_get_user_topic(db, context.bot, user, int(telegram_config.admin_group_id))
+        topic = await create_or_get_user_topic(context.bot, user)
         
-        if not topic_id:
+        if not topic:
             logger.error(f"无法为用户 {user.id} 创建话题")
             await message.reply_text("无法创建客服会话，请稍后再试或联系管理员。")
             return
             
+        topic_id = topic.message_thread_id
         logger.info(f"成功获取话题ID: {topic_id}")
     except Exception as e:
         logger.error(f"创建或获取用户话题时出错: {str(e)}")
@@ -921,3 +829,26 @@ async def forward_to_admin_group(update: Update, context: ContextTypes.DEFAULT_T
     except Exception as e:
         logger.error(f"转发用户消息时出错: {str(e)}")
         await message.reply_text("消息发送失败，请稍后重试。")
+
+async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """处理回调查询"""
+    try:
+        query = update.callback_query
+        data = query.data
+        
+        logger.info(f"处理回调查询: {data}")
+        
+        # 根据回调数据类型分发处理
+        if data.startswith("read_"):
+            # 处理标记已读回调
+            logger.info(f"处理标记已读回调: {data}")
+            # 直接传递给process_callback_query处理
+            from app.telegram.callbacks import process_callback_query
+            await process_callback_query(update, context)
+        else:
+            # 其他回调类型，传递给process_callback_query
+            from app.telegram.callbacks import process_callback_query
+            await process_callback_query(update, context)
+    except Exception as e:
+        logger.error(f"处理回调查询时出错: {str(e)}")
+        await update.callback_query.answer("处理失败，请重试")

@@ -13,8 +13,4 @@ class MessageMap(Base):
     unread_topic_message_id = Column(Integer, nullable=True)  # 未读话题中的消息ID
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     handled_by_user_id = Column(Integer, nullable=True)  # 处理人的Telegram ID
-    handled_time = Column(DateTime(timezone=True), nullable=True)  # 处理时间
-    # 添加群组来源信息
-    is_from_group = Column(Boolean, default=False)  # 是否来自群组
-    source_group_id = Column(Integer, nullable=True)  # 来源群组ID
-    source_group_name = Column(String, nullable=True)  # 来源群组名称 
+    handled_time = Column(DateTime(timezone=True), nullable=True)  # 处理时间 

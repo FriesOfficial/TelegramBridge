@@ -80,7 +80,7 @@ os.makedirs("assets/imgs", exist_ok=True)
 
 # 导入配置和工具函数
 from app.config.telegram_config import telegram_config
-from app.database.database import get_db, auto_migrate
+from app.database.database import get_db
 from app.telegram.utils import (
     check_user_ban_status,
     create_or_get_user_topic,
@@ -90,12 +90,11 @@ from app.telegram.utils import (
     forward_message_to_user,
     forward_message_to_admin,
     handle_media_group,
-    process_callback_vcode,
     forwarding_message_u2a,
     forwarding_message_a2u,
     initialize_system_topics
 )
-from app.telegram.group_handlers import handle_group_mention
+
 
 # 全局变量
 bot_instance = None
@@ -123,57 +122,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     )
     await update.message.reply_text(help_text)
 
-async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """处理/broadcast命令，向所有用户广播消息"""
-    try:
-        # 只有管理员才能执行此命令
-        user_id = update.effective_user.id
-        if user_id not in telegram_config.admin_user_ids:
-            await update.message.reply_text("您没有权限执行此操作")
-            return
-            
-        # 检查是否回复了要广播的消息
-        if not update.message.reply_to_message:
-            await update.message.reply_text("请回复要广播的消息")
-            return
-            
-        # 获取所有用户
-        db = next(get_db())
-        from app.models.user import User
-        users = db.query(User).filter(User.is_banned == False).all()
-        
-        # 发送广播消息
-        broadcast_message = update.message.reply_to_message
-        success_count = 0
-        fail_count = 0
-        
-        for user in users:
-            try:
-                if broadcast_message.text:
-                    await context.bot.send_message(
-                        chat_id=user.id,
-                        text=broadcast_message.text
-                    )
-                elif broadcast_message.photo:
-                    await context.bot.send_photo(
-                        chat_id=user.id,
-                        photo=broadcast_message.photo[-1].file_id,
-                        caption=broadcast_message.caption
-                    )
-                # 可以添加更多消息类型的处理
-                
-                success_count += 1
-            except Exception as e:
-                logger.error(f"向用户 {user.id} 发送广播消息失败: {str(e)}")
-                fail_count += 1
-                
-        await update.message.reply_text(
-            f"广播完成: 成功 {success_count} 个, 失败 {fail_count} 个"
-        )
-    except Exception as e:
-        logger.error(f"广播消息时出错: {str(e)}")
-        await update.message.reply_text(f"广播失败: {str(e)}")
-
 async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """处理回调查询"""
     try:
@@ -183,9 +131,7 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
         logger.info(f"处理回调查询: {data}")
         
         # 根据回调数据类型分发处理
-        if data.startswith("vcode_"):
-            await process_callback_vcode(update, context)
-        elif data.startswith("read_"):
+        if data.startswith("read_"):
             # 处理标记已读回调
             logger.info(f"处理标记已读回调: {data}")
             # 直接传递给process_callback_query处理
@@ -269,28 +215,6 @@ def setup_application() -> Application:
         )
     )
     
-    #添加群组@消息处理程序
-    application.add_handler(
-        MessageHandler(
-            ~filters.COMMAND & filters.ChatType.GROUPS & 
-            (filters.Entity("mention") | filters.CaptionEntity("mention") | 
-             # 使用标准过滤器方法捕获所有媒体类型的消息
-            filters.TEXT| filters.PHOTO | filters.VIDEO  | filters.AUDIO | filters.VOICE),
-            handle_group_mention,
-        )
-    )
-    
-    # 添加管理命令处理程序
-    # 移除clear命令的处理程序
-    
-    application.add_handler(
-        CommandHandler(
-            "broadcast", 
-            broadcast, 
-            filters.Chat(chat_id=telegram_config.admin_group_id)
-        )
-    )
-    
     # 添加回调查询处理程序
     application.add_handler(CallbackQueryHandler(callback_query_handler))
     
@@ -303,14 +227,11 @@ def init_database():
     """初始化数据库"""
     try:
         # 导入数据库模型并创建表
-        from app.database.database import Base, engine, auto_migrate
+        from app.database.database import Base, engine
         from app.models import User, MediaGroupMessage, FormnStatus, MessageMap
         
         # 创建基本表结构
         Base.metadata.create_all(bind=engine)
-        
-        # 自动迁移数据库结构
-        auto_migrate()
         
         logger.info("数据库初始化成功")
         return True
@@ -375,7 +296,6 @@ async def main():
     """主函数"""
     parser = argparse.ArgumentParser(description="Telegram客服系统")
     parser.add_argument("--debug", action="store_true", help="启用调试模式")
-    parser.add_argument("--db-only", action="store_true", help="仅初始化数据库，不启动机器人")
     parser.add_argument("--env", help="指定自定义.env文件路径", default=".env")
     args = parser.parse_args()
     
@@ -410,11 +330,6 @@ async def main():
     if not init_database():
         logger.error("数据库初始化失败")
         return 1
-    
-    # 如果只需要初始化数据库，到此结束
-    if args.db_only:
-        logger.info("数据库初始化完成，退出")
-        return 0
     
     # 验证机器人环境并初始化系统话题
     try:

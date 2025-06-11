@@ -7,9 +7,8 @@ from app.telegram import (
     utils,
     callbacks,
     bot,
-    group_handlers,
     file_handlers
 )
 
 # 暴露主要功能
-__all__ = ["utils", "callbacks", "bot", "group_handlers", "file_handlers"]
+__all__ = ["utils", "callbacks", "bot", "file_handlers"]

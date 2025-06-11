@@ -36,9 +36,6 @@ from app.models.message_map import MessageMap
 from app.models.media_group_message import MediaGroupMessage
 from app.models.formn_status import FormnStatus
 from app.telegram.callbacks import (
-    generate_verification_code,
-    create_verification_keyboard,
-    process_callback_vcode,
     process_callback_query
 )
 
@@ -129,13 +126,16 @@ async def get_system_topic(bot: Bot, topic_name: str) -> Optional[ForumTopic]:
         
         # 系统话题存在，直接返回
         if forum_status:
-            # 直接返回话题对象，不进行验证
+            # 直接创建ForumTopic对象，不进行验证
             # 如果话题不存在，会在后续使用时捕获BadRequest异常
-            return ForumTopic(
+            topic = ForumTopic(
                 message_thread_id=forum_status.topic_id,
                 name=forum_status.topic_name,
                 icon_color=0x6FB9F0  # 默认颜色
             )
+            
+            # 直接返回话题对象，如果话题不存在，会在后续使用时捕获异常
+            return topic
         
         # 系统话题不存在，创建新话题
         # 根据话题名称选择不同的图标颜色
@@ -253,181 +253,106 @@ async def get_user_by_id(db, user_id: int, create_if_not_exists: bool = False) -
         db.rollback()
         return None
 
-async def create_or_get_user_topic(bot: Bot, user: User, from_group: bool = False, source_group_id: int = None, source_group_name: str = None) -> Optional[ForumTopic]:
-    """为用户创建话题或获取现有话题
+async def create_or_get_user_topic(bot: Bot, user: User) -> Optional[ForumTopic]:
+    """
+    为用户创建或获取话题
     
     Args:
-        bot: Bot实例
+        bot: 机器人对象
         user: 用户对象
-        from_group: 是否来自群组消息
-        source_group_id: 来源群组ID（如果from_group为True）
-        source_group_name: 来源群组名称（如果from_group为True）
         
     Returns:
-        ForumTopic: 话题对象
+        ForumTopic: 话题对象，如果失败则返回None
     """
     try:
         db = next(get_db())
         
-        # 获取用户的Premium状态
-        try:
-            user_chat = await bot.get_chat(user.id)
-            is_premium = getattr(user_chat, 'is_premium', False)
-        except Exception as e:
-            logger.error(f"获取用户Premium状态时出错: {str(e)}")
-            is_premium = getattr(user, 'is_premium', False)  # 尝试从User对象获取
-        
-        # 检查用户是否有对应类型的话题（私聊或群组）
+        # 尝试获取用户现有的话题
+        user_model = await get_user_by_id(db, user.id, create_if_not_exists=True)
+        if not user_model:
+            logger.error(f"无法获取用户 {user.id} 的数据库记录")
+            return None
+            
+        # 查询用户的话题
         query = db.query(FormnStatus).filter(
-            FormnStatus.user_id == user.id,
-            FormnStatus.from_group == from_group
+            FormnStatus.user_id == user.id
         )
         
-        # 如果是群组消息，还需匹配群组ID
-        if from_group and source_group_id:
-            query = query.filter(FormnStatus.source_group_id == source_group_id)
-            
         forum_status = query.first()
         
-        # 如果数据库中有话题记录，直接返回，无需验证
-        # 后续在使用时如果发现话题不存在，会触发BadRequest异常，在外部处理
+        # 如果找到了话题，直接返回话题对象
         if forum_status:
-            # 检查话题名称是否需要更新Premium标记
-            premium_mark = "💎"
-            needs_update = False
+            # 直接创建ForumTopic对象，不进行验证
+            topic = ForumTopic(
+                message_thread_id=forum_status.topic_id,
+                name=forum_status.topic_name,
+                icon_color=0  # 默认颜色
+            )
             
-            # 确定正确的前缀格式
-            group_prefix = "[群组] " if from_group else ""
-            
-            if is_premium and not (forum_status.topic_name.startswith(premium_mark) or 
-                                  (from_group and forum_status.topic_name.startswith(f"[群组] {premium_mark}"))):
-                # 用户是Premium会员但话题名称中没有钻石标记，需要更新
-                if from_group:
-                    new_topic_name = f"[群组] {premium_mark}{forum_status.topic_name.replace('[群组] ', '')}"
-                else:
-                    new_topic_name = f"{premium_mark}{forum_status.topic_name}"
-                needs_update = True
-            elif not is_premium and premium_mark in forum_status.topic_name:
-                # 用户不是Premium会员但话题名称有钻石标记，需要更新
-                if from_group:
-                    new_topic_name = f"[群组] {forum_status.topic_name.replace('[群组] ', '').replace(premium_mark, '')}"
-                else:
-                    new_topic_name = forum_status.topic_name.replace(premium_mark, '')
-                needs_update = True
-            
-            if needs_update:
-                try:
-                    # 更新话题名称
-                    await bot.edit_forum_topic(
-                        chat_id=telegram_config.admin_group_id,
-                        message_thread_id=forum_status.topic_id,
-                        name=new_topic_name[:64]  # 确保不超过最大长度
-                    )
+            # 直接返回话题对象，如果话题不存在，会在后续使用时捕获异常
+            return topic
                     
-                    # 更新数据库记录
-                    forum_status.topic_name = new_topic_name[:64]
-                    db.commit()
-                    logger.info(f"已更新用户 {user.id} 的话题名称以反映Premium状态: {new_topic_name[:64]}")
-                except BadRequest as e:
-                    # 如果是话题不存在错误，标记为需要重新创建
-                    if "message thread not found" in str(e).lower() or "chat not found" in str(e).lower():
-                        # 删除旧记录
-                        db.delete(forum_status)
-                        db.commit()
-                        # 将在下面重新创建话题
-                        forum_status = None
-                    else:
-                        logger.error(f"更新话题名称时出错: {str(e)}")
-                except Exception as update_e:
-                    logger.error(f"更新话题名称时出错: {str(update_e)}")
-            
-            # 如果话题记录存在且没有被标记为需要重新创建，直接返回
-            if forum_status:
-                return ForumTopic(
-                    message_thread_id=forum_status.topic_id,
-                    name=forum_status.topic_name,
-                    icon_color=0x6FB9F0  # 默认的蓝色图标颜色
-                )
-        
         # 创建新话题
-        premium_mark = "💎" if is_premium else ""
-        # 根据来源添加不同前缀
-        group_prefix = "[群组] " if from_group else ""
+        premium_mark = "⭐️ " if user_model.is_premium else ""
+        topic_name = f"{premium_mark}{user.first_name}"
         
-        # 构建话题名称，确保不显示None
-        topic_name = f"{group_prefix}{premium_mark}{user.first_name}"
-        if user.last_name:  # 只有当last_name不为None时才添加
-            topic_name += f" {user.last_name}"
-        
-        # 如果来自群组，添加群组信息
-        if from_group and source_group_name:
-            topic_name += f" - {source_group_name}"
-        
-        topic = await retry_with_backoff(
-            bot.create_forum_topic,
-            chat_id=telegram_config.admin_group_id,
-            name=topic_name[:64]  # 话题名称最大长度为64
-        )
-        
-        # 创建新的话题记录
-        new_forum_status = FormnStatus(
-            user_id=user.id,
-            topic_id=topic.message_thread_id,
-            topic_name=topic_name[:64],
-            from_group=from_group,
-            source_group_id=source_group_id if from_group else None,
-            source_group_name=source_group_name if from_group else None
-        )
-        
-        # 添加新记录并提交
-        db.add(new_forum_status)
-        db.commit()
-        logger.info(f"为用户 {user.id} 创建话题: {topic.message_thread_id} (来自群组: {from_group})")
-        
-        # 发送话题介绍消息
-        intro_text = f"用户信息:\nID: {user.id}\n"
-        if user.username:
-            intro_text += f"用户名: @{user.username}\n"
-        intro_text += f"昵称: {user.first_name}"
-        if user.last_name:
-            intro_text += f" {user.last_name}"
-        
-        # 添加Telegram Premium会员状态信息
-        intro_text += f"\n\n🏅 Telegram会员: {'💎 是' if is_premium else '❌ 否'}"
-        
-        # 如果来自群组，添加群组信息（确保不显示None）
-        if from_group:
-            group_info = "\n\n📣 来源群组: "
-            if source_group_name:
-                group_info += source_group_name
-            else:
-                group_info += "未知群组"
+        # 创建话题
+        try:
+            topic = await bot.create_forum_topic(
+                chat_id=telegram_config.admin_group_id,
+                name=topic_name
+            )
             
-            if source_group_id:
-                group_info += f" [ID: {source_group_id}]"
+            # 保存话题信息到数据库
+            new_forum_status = FormnStatus(
+                user_id=user.id,
+                topic_id=topic.message_thread_id,
+                topic_name=topic_name,
+                created_at=datetime.now(),
+                updated_at=datetime.now()
+            )
+            db.add(new_forum_status)
+            db.commit()
             
-            intro_text += group_info
-        
-        # 创建"已读"和"封禁"按钮
-        keyboard = [
-            [
-                InlineKeyboardButton("✅ 标记为已读", callback_data=f"read_all_{user.id}"),
-                InlineKeyboardButton("🚫 封禁用户", callback_data=f"ban_{user.id}")
+            logger.info(f"为用户 {user.id} 创建话题: {topic.message_thread_id}")
+            
+            # 在话题中发送用户信息介绍
+            intro_text = f"用户信息:\n\n"
+            intro_text += f"• 用户ID: `{user.id}`\n"
+            intro_text += f"• 昵称: {user.full_name}\n"
+            
+            if user.username:
+                intro_text += f"• 用户名: @{user.username}\n"
+                
+            intro_text += f"• 注册时间: {user_model.created_at.strftime('%Y-%m-%d %H:%M:%S')}\n"
+            intro_text += f"• 会员状态: {'⭐️ 会员' if user_model.is_premium else '普通用户'}\n"
+            
+            # 创建操作按钮
+            keyboard = [
+                [
+                    InlineKeyboardButton("✅ 标记为已读", callback_data=f"read_all_{user.id}"),
+                    InlineKeyboardButton("🚫 封禁用户", callback_data=f"ban_{user.id}")
+                ]
             ]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
+            reply_markup = InlineKeyboardMarkup(keyboard)
             
-        await retry_with_backoff(
-            bot.send_message,
-            chat_id=telegram_config.admin_group_id,
-            text=intro_text,
-            message_thread_id=topic.message_thread_id,
-            reply_markup=reply_markup
-        )
-        
-        return topic
+            # 发送介绍信息
+            await bot.send_message(
+                chat_id=telegram_config.admin_group_id,
+                text=intro_text,
+                message_thread_id=topic.message_thread_id,
+                parse_mode="Markdown",
+                reply_markup=reply_markup
+            )
+            
+            return topic
+        except Exception as create_error:
+            logger.error(f"创建新话题时出错: {str(create_error)}")
+            db.rollback()
+            return None
+            
     except Exception as e:
-        logger.error(f"创建话题时出错: {str(e)}")
+        logger.error(f"创建或获取用户话题时出错: {str(e)}")
         if 'db' in locals():
             db.rollback()
         return None
@@ -496,7 +421,7 @@ async def send_message_to_topic(context: ContextTypes.DEFAULT_TYPE, message: Mes
                     db.delete(forum_status)
                     db.commit()
                 
-                # 直接创建新话题，内部会处理旧记录的删除
+                # 创建新话题
                 new_topic = await create_or_get_user_topic(context.bot, user)
                 if not new_topic:
                     logger.error(f"为用户 {user.id} 创建新话题失败")
@@ -539,36 +464,17 @@ async def send_to_unread_topic(context: ContextTypes.DEFAULT_TYPE, user: User, m
             logger.error(f"找不到消息映射: {admin_message.message_id}")
             return False
         
-        # 检查消息来源（私聊/群组）- 直接从message_map中获取
-        is_from_group = message_map.is_from_group
-        group_name = message_map.source_group_name
-        group_id = message_map.source_group_id
-        
-        # 检查该用户是否已经有相同来源的未读消息
-        # 如果是群组消息，需要检查是否来自相同群组
-        if is_from_group:
-            existing_unread = db.query(MessageMap).filter(
-                MessageMap.user_telegram_id == user.id,
-                MessageMap.is_unread_topic == True,
-                MessageMap.is_from_group == True,
-                MessageMap.source_group_id == group_id
-            ).first()
-        else:
-            # 如果是私聊消息，只检查是否有私聊未读消息
-            existing_unread = db.query(MessageMap).filter(
-                MessageMap.user_telegram_id == user.id,
-                MessageMap.is_unread_topic == True,
-                MessageMap.is_from_group == False
-            ).first()
+        # 检查该用户是否已经有未读消息
+        existing_unread = db.query(MessageMap).filter(
+            MessageMap.user_telegram_id == user.id,
+            MessageMap.is_unread_topic == True
+        ).first()
         
         if existing_unread:
-            # 用户已有相同来源的未读消息，仅更新当前消息的is_unread_topic标记
+            # 用户已有私聊未读消息，仅更新当前消息的is_unread_topic标记
             message_map.is_unread_topic = True
             db.commit()
-            if is_from_group:
-                logger.info(f"用户 {user.id} 已有来自群组 {group_id} 的未读消息，不重复发送到未读话题")
-            else:
-                logger.info(f"用户 {user.id} 已有私聊未读消息，不重复发送到未读话题")
+            logger.info(f"用户 {user.id} 已有私聊未读消息，不重复发送到未读话题")
             return True
             
         # 准备URL链接（从群组ID中去除负号和前面的100）
@@ -586,20 +492,9 @@ async def send_to_unread_topic(context: ContextTypes.DEFAULT_TYPE, user: User, m
             topic_id = topic.message_thread_id
         else:
             # 如果没有提供有效的topic，尝试从数据库中获取用户的话题ID
-            # 根据消息来源查找正确的话题
-            if is_from_group and group_id:
-                # 如果是群组消息，找到对应群组的话题
-                user_forum_status = db.query(FormnStatus).filter(
-                    FormnStatus.user_id == user.id,
-                    FormnStatus.from_group == True,
-                    FormnStatus.source_group_id == group_id
-                ).first()
-            else:
-                # 如果是私聊消息，找到私聊话题
-                user_forum_status = db.query(FormnStatus).filter(
-                    FormnStatus.user_id == user.id,
-                    FormnStatus.from_group == False
-                ).first()
+            user_forum_status = db.query(FormnStatus).filter(
+                FormnStatus.user_id == user.id
+            ).first()
                 
             if user_forum_status:
                 topic_id = user_forum_status.topic_id
@@ -638,16 +533,8 @@ async def send_to_unread_topic(context: ContextTypes.DEFAULT_TYPE, user: User, m
         message_text = "📝 *新消息通知*\n"
         message_text += "━━━━━━━━━━━━━━━\n"
         
-        # 添加消息来源信息 - 使用更醒目的标识
-        if is_from_group:
-            message_text += "📢 *来源*: *群组消息*\n"
-            if group_name:
-                message_text += f"• 群组: `{group_name}`\n"
-            if group_id:
-                message_text += f"• 群组ID: `{group_id}`\n"
-        else:
-            message_text += "💬 *来源*: *私聊消息*\n"
-            
+        # 标记为私聊消息
+        message_text += "💬 *来源*: *私聊消息*\n"
         message_text += "━━━━━━━━━━━━━━━\n"
         message_text += "👤 *用户信息*\n"
 
@@ -678,6 +565,7 @@ async def send_to_unread_topic(context: ContextTypes.DEFAULT_TYPE, user: User, m
         logger.debug(f"准备发送消息到未读话题 ID={unread_topic.message_thread_id}, 群组ID={telegram_config.admin_group_id}")
         
         try:
+            # 直接尝试发送消息到未读话题
             unread_message = await retry_with_backoff(
                 context.bot.send_message,
                 chat_id=telegram_config.admin_group_id,
@@ -694,11 +582,11 @@ async def send_to_unread_topic(context: ContextTypes.DEFAULT_TYPE, user: User, m
             
             logger.info(f"用户消息已转发到未读话题: {user.id} -> {unread_topic.message_thread_id}")
             return True
-            
+                
         except BadRequest as e:
             # 检查是否是"话题不存在"错误
             error_msg = str(e).lower()
-            needs_recreation = "message thread not found" in error_msg or "chat not found" in error_msg
+            needs_recreation = "message thread not found" in error_msg or "chat not found" in error_msg or "topic_id_invalid" in str(e).lower()
             
             if needs_recreation:
                 logger.warning(f"未读话题 {unread_topic.message_thread_id} 不存在，尝试重新获取")
@@ -717,36 +605,33 @@ async def send_to_unread_topic(context: ContextTypes.DEFAULT_TYPE, user: User, m
                 # 重新获取未读话题
                 new_unread_topic = await get_system_topic(context.bot, UNREAD_TOPIC_NAME)
                 if not new_unread_topic:
-                    logger.error("无法重新获取未读话题")
+                    logger.error("重新获取未读话题失败")
                     return False
+                    
+                # 重试发送消息
+                unread_message = await retry_with_backoff(
+                    context.bot.send_message,
+                    chat_id=telegram_config.admin_group_id,
+                    text=message_text,
+                    reply_markup=reply_markup,
+                    message_thread_id=new_unread_topic.message_thread_id,
+                    parse_mode="Markdown"  # 启用Markdown格式
+                )
                 
-                # 使用新话题重试
-                try:
-                    retry_message = await context.bot.send_message(
-                        chat_id=telegram_config.admin_group_id,
-                        text=message_text,
-                        reply_markup=reply_markup,
-                        message_thread_id=new_unread_topic.message_thread_id,
-                        parse_mode="Markdown"  # 启用Markdown格式
-                    )
-                    
-                    # 更新消息映射，确保设置unread_topic_message_id
-                    message_map.is_unread_topic = True
-                    message_map.unread_topic_message_id = retry_message.message_id  # 保存新的未读话题消息ID
-                    db.commit()
-                    
-                    logger.info(f"成功重试发送到新的未读话题: {user.id} -> {new_unread_topic.message_thread_id}")
-                    logger.info(f"设置未读话题消息ID: {retry_message.message_id}")
-                    return True
-                except Exception as retry_error:
-                    logger.error(f"重试发送到新未读话题时出错: {str(retry_error)}")
-                    return False
+                # 更新消息映射
+                message_map.is_unread_topic = True
+                message_map.unread_topic_message_id = unread_message.message_id  # 保存未读话题消息ID
+                db.commit()
+                
+                logger.info(f"用户消息已转发到新的未读话题: {user.id} -> {new_unread_topic.message_thread_id}")
+                return True
             else:
-                # 其他BadRequest错误
-                logger.error(f"发送到未读话题时出错: {str(e)}")
+                # 其他API错误
+                logger.error(f"发送消息到未读话题时出错: {str(e)}")
                 return False
+                
     except Exception as e:
-        logger.error(f"转发到未读消息话题失败: {str(e)}")
+        logger.error(f"发送到未读话题时出错: {str(e)}")
         return False
 
 async def forward_message_to_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -808,15 +693,14 @@ async def forward_message_to_admin(update: Update, context: ContextTypes.DEFAULT
                 user_telegram_id=user.id,
                 user_chat_message_id=message.message_id,
                 group_chat_message_id=admin_message.message_id,
-                created_at=datetime.now(),
-                is_from_group=False  # 标记为私聊消息
+                created_at=datetime.now()
             )
             db.add(message_map)
             db.commit()
             
             logger.info(f"用户消息已转发到话题: {user.id} -> {topic.message_thread_id}")
             
-            # 转发到未读话题，无需提前检查，让send_to_unread_topic函数自己判断是否需要发送
+            # 转发到未读话题
             await send_to_unread_topic(context, user, message, admin_message, topic, unread_topic)
     except Exception as e:
         logger.error(f"转发消息到管理群组时出错: {str(e)}")
@@ -840,7 +724,6 @@ async def forward_message_to_user(update: Update, context: ContextTypes.DEFAULT_
             logger.warning(f"找不到话题 {topic_id} 对应的用户")
             await update.message.reply_text("找不到对应的用户，无法转发消息")
             return
-            
             
         user_id = forum_status.user_id
         message = update.message
@@ -870,43 +753,25 @@ async def forward_message_to_user(update: Update, context: ContextTypes.DEFAULT_
                 user_telegram_id=user_id,
                 user_chat_message_id=user_message.message_id,
                 group_chat_message_id=message.message_id,
-                created_at=datetime.now(),
-                is_from_group=forum_status.from_group,  # 根据话题来源设置
-                source_group_id=forum_status.source_group_id,  # 记录群组ID
-                source_group_name=forum_status.source_group_name  # 记录群组名称
+                created_at=datetime.now()
             )
             db.add(message_map)
             db.commit()
             
-            # 自动将该用户的对应来源的未读消息标记为已读
+            # 自动将该用户的私聊未读消息标记为已读
             try:
-                # 判断当前消息的来源类型
-                is_from_group = forum_status.from_group
-                source_group_id = forum_status.source_group_id
-                
-                # 根据来源类型查找对应的未读消息
-                if is_from_group:
-                    # 如果是群组消息，只标记来自相同群组的未读消息为已读
-                    unread_messages = db.query(MessageMap).filter(
-                        MessageMap.user_telegram_id == user_id,
-                        MessageMap.is_unread_topic == True,
-                        MessageMap.is_from_group == True,
-                        MessageMap.source_group_id == source_group_id
-                    ).all()
-                else:
-                    # 如果是私聊消息，只标记私聊的未读消息为已读
-                    unread_messages = db.query(MessageMap).filter(
-                        MessageMap.user_telegram_id == user_id,
-                        MessageMap.is_unread_topic == True,
-                        MessageMap.is_from_group == False
-                    ).all()
+                # 查找私聊的未读消息
+                unread_messages = db.query(MessageMap).filter(
+                    MessageMap.user_telegram_id == user_id,
+                    MessageMap.is_unread_topic == True
+                ).all()
                 
                 if unread_messages:
                     # 标记所有未读消息为已读
                     now = datetime.now()
                     for unread_msg in unread_messages:
                         unread_msg.is_unread_topic = False
-                        unread_msg.handled_by_user_id = context.bot.id  # 使用bot ID作为处理人
+                        unread_msg.handled_by_user_id = update.effective_user.id  # 使用回复的管理员ID
                         unread_msg.handled_time = now
                         
                         # 尝试删除未读话题中的消息
@@ -922,9 +787,7 @@ async def forward_message_to_user(update: Update, context: ContextTypes.DEFAULT_
                     
                     # 提交更改
                     db.commit()
-                    source_type = "群组" if is_from_group else "私聊"
-                    source_info = f" ({forum_status.source_group_name})" if is_from_group and forum_status.source_group_name else ""
-                    logger.info(f"用户 {user_id} 回复了管理员消息，已自动将{source_type}{source_info}未读消息({len(unread_messages)}条)标记为已读")
+                    logger.info(f"已自动将用户 {user_id} 的私聊未读消息({len(unread_messages)}条)标记为已读")
             except Exception as e:
                 logger.error(f"自动标记用户未读消息时出错: {str(e)}")
             
@@ -1077,21 +940,79 @@ async def send_media_group_to_admin(context: ContextTypes.DEFAULT_TYPE) -> None:
                         user_telegram_id=user_id,
                         user_chat_message_id=media_group_msgs[i].message_id,
                         group_chat_message_id=admin_message.message_id,
-                        created_at=datetime.now(),
-                        is_from_group=False  # 标记为私聊消息
+                        created_at=datetime.now()
                     )
                     db.add(message_map)
             
             db.commit()
             logger.info(f"用户 {user_id} 的媒体组已转发到话题 {topic.message_thread_id}")
             
-            # 只转发第一条消息到未读话题，无需提前检查，让send_to_unread_topic函数自己判断是否需要发送
+            # 只转发第一条消息到未读话题
             if admin_messages:
                 first_admin_msg = admin_messages[0]
                 if first_admin_msg:
                     # 传递私聊媒体消息到未读话题
                     await send_to_unread_topic(context, user, None, first_admin_msg, topic, unread_topic)
         
+        except BadRequest as e:
+            # 检查是否是话题不存在错误
+            error_msg = str(e).lower()
+            needs_recreation = "message thread not found" in error_msg or "chat not found" in error_msg or "topic_id_invalid" in str(e).lower()
+            
+            if needs_recreation:
+                logger.warning(f"用户话题 {topic.message_thread_id} 不存在，尝试重新创建")
+                
+                # 删除数据库中的旧话题记录
+                old_forum_status = db.query(FormnStatus).filter(
+                    FormnStatus.user_id == user_id
+                ).first()
+                
+                if old_forum_status:
+                    db.delete(old_forum_status)
+                    db.commit()
+                    
+                # 重新创建话题
+                new_topic = await create_or_get_user_topic(context.bot, user)
+                if not new_topic:
+                    logger.error(f"为用户 {user_id} 重新创建话题失败")
+                    return
+                    
+                logger.info(f"已为用户 {user_id} 创建新话题: {new_topic.message_thread_id}")
+                
+                # 重新尝试发送媒体组
+                try:
+                    admin_messages = await admin_chat.send_copies(
+                        from_chat_id=user_id,
+                        message_ids=message_ids,
+                        message_thread_id=new_topic.message_thread_id
+                    )
+                    
+                    # 保存消息映射
+                    for i, admin_message in enumerate(admin_messages):
+                        if i < len(media_group_msgs):
+                            message_map = MessageMap(
+                                user_telegram_id=user_id,
+                                user_chat_message_id=media_group_msgs[i].message_id,
+                                group_chat_message_id=admin_message.message_id,
+                                created_at=datetime.now()
+                            )
+                            db.add(message_map)
+                    
+                    db.commit()
+                    logger.info(f"用户 {user_id} 的媒体组已转发到新话题 {new_topic.message_thread_id}")
+                    
+                    # 只转发第一条消息到未读话题
+                    if admin_messages:
+                        first_admin_msg = admin_messages[0]
+                        if first_admin_msg:
+                            # 传递私聊媒体消息到未读话题
+                            await send_to_unread_topic(context, user, None, first_admin_msg, new_topic, unread_topic)
+                
+                except Exception as retry_error:
+                    logger.error(f"重试发送媒体组到新话题时出错: {str(retry_error)}")
+            else:
+                # 其他BadRequest错误
+                logger.error(f"发送媒体组到管理员话题时出错: {str(e)}")
         except Exception as e:
             logger.error(f"发送媒体组到管理员话题时出错: {str(e)}")
                 
@@ -1120,17 +1041,10 @@ async def send_media_group_to_user(context: ContextTypes.DEFAULT_TYPE) -> None:
             logger.warning(f"未找到媒体组 {media_group_id} 的消息")
             return
             
-        # 获取话题信息，判断是否来自群组
+        # 获取话题信息
         forum_status = db.query(FormnStatus).filter(FormnStatus.topic_id == topic_id).first()
         if not forum_status:
             logger.warning(f"找不到话题 {topic_id} 对应的用户")
-            return
-            
-        # 如果是群组话题，转发到群组而不是用户私聊
-        if forum_status.from_group and forum_status.source_group_id:
-            # 引用group_handlers模块中的send_topic_media_to_group函数
-            from app.telegram.group_handlers import send_topic_media_to_group
-            await send_topic_media_to_group(context, media_group_id, topic_id, forum_status)
             return
             
         # 获取用户的Chat对象
@@ -1156,38 +1070,20 @@ async def send_media_group_to_user(context: ContextTypes.DEFAULT_TYPE) -> None:
                         user_telegram_id=user_id,
                         user_chat_message_id=user_message.message_id,
                         group_chat_message_id=media_group_msgs[i].message_id,
-                        created_at=datetime.now(),
-                        is_from_group=forum_status.from_group,  # 根据话题来源设置
-                        source_group_id=forum_status.source_group_id,  # 记录群组ID
-                        source_group_name=forum_status.source_group_name  # 记录群组名称
+                        created_at=datetime.now()
                     )
                     db.add(message_map)
             
             db.commit()
             logger.info(f"管理员消息已转发: {topic_id} -> {user_id}")
             
-            # 自动将该用户的对应来源的未读消息标记为已读
+            # 自动将该用户的私聊未读消息标记为已读
             try:
-                # 判断当前消息的来源类型
-                is_from_group = forum_status.from_group
-                source_group_id = forum_status.source_group_id
-                
-                # 根据来源类型查找对应的未读消息
-                if is_from_group:
-                    # 如果是群组消息，只标记来自相同群组的未读消息为已读
-                    unread_messages = db.query(MessageMap).filter(
-                        MessageMap.user_telegram_id == user_id,
-                        MessageMap.is_unread_topic == True,
-                        MessageMap.is_from_group == True,
-                        MessageMap.source_group_id == source_group_id
-                    ).all()
-                else:
-                    # 如果是私聊消息，只标记私聊的未读消息为已读
-                    unread_messages = db.query(MessageMap).filter(
-                        MessageMap.user_telegram_id == user_id,
-                        MessageMap.is_unread_topic == True,
-                        MessageMap.is_from_group == False
-                    ).all()
+                # 查找私聊的未读消息
+                unread_messages = db.query(MessageMap).filter(
+                    MessageMap.user_telegram_id == user_id,
+                    MessageMap.is_unread_topic == True
+                ).all()
                 
                 if unread_messages:
                     # 标记所有未读消息为已读
@@ -1210,9 +1106,7 @@ async def send_media_group_to_user(context: ContextTypes.DEFAULT_TYPE) -> None:
                     
                     # 提交更改
                     db.commit()
-                    source_type = "群组" if is_from_group else "私聊"
-                    source_info = f" ({forum_status.source_group_name})" if is_from_group and forum_status.source_group_name else ""
-                    logger.info(f"用户 {user_id} 回复了管理员消息，已自动将{source_type}{source_info}未读消息({len(unread_messages)}条)标记为已读")
+                    logger.info(f"用户 {user_id} 回复了管理员消息，已自动将私聊未读消息({len(unread_messages)}条)标记为已读")
             except Exception as e:
                 logger.error(f"自动标记用户未读消息时出错: {str(e)}")
         
@@ -1255,28 +1149,13 @@ async def forwarding_message_u2a(update: Update, context: ContextTypes.DEFAULT_T
             if admin_message_map:
                 is_reply_to_admin = True
                 
-                # 如果用户回复的是管理员的消息，标记对应来源的未读消息为已读
+                # 标记私聊未读消息为已读
                 try:
-                    # 确定消息来源（私聊/群组）
-                    is_from_group = admin_message_map.is_from_group
-                    source_group_id = admin_message_map.source_group_id
-                    
-                    # 根据来源类型查找对应的未读消息
-                    if is_from_group:
-                        # 如果是群组消息，只标记来自相同群组的未读消息为已读
-                        unread_messages = db.query(MessageMap).filter(
-                            MessageMap.user_telegram_id == user.id,
-                            MessageMap.is_unread_topic == True,
-                            MessageMap.is_from_group == True,
-                            MessageMap.source_group_id == source_group_id
-                        ).all()
-                    else:
-                        # 如果是私聊消息，只标记私聊的未读消息为已读
-                        unread_messages = db.query(MessageMap).filter(
-                            MessageMap.user_telegram_id == user.id,
-                            MessageMap.is_unread_topic == True,
-                            MessageMap.is_from_group == False
-                        ).all()
+                    # 查找私聊的未读消息
+                    unread_messages = db.query(MessageMap).filter(
+                        MessageMap.user_telegram_id == user.id,
+                        MessageMap.is_unread_topic == True
+                    ).all()
                     
                     if unread_messages:
                         # 标记所有未读消息为已读
@@ -1299,9 +1178,7 @@ async def forwarding_message_u2a(update: Update, context: ContextTypes.DEFAULT_T
                     
                         # 提交更改
                         db.commit()
-                        source_type = "群组" if is_from_group else "私聊"
-                        source_info = f" ({admin_message_map.source_group_name})" if is_from_group and admin_message_map.source_group_name else ""
-                        logger.info(f"用户 {user.id} 回复了管理员消息，已自动将{source_type}{source_info}未读消息({len(unread_messages)}条)标记为已读")
+                        logger.info(f"用户 {user.id} 回复了管理员消息，已自动将私聊未读消息({len(unread_messages)}条)标记为已读")
                 except Exception as e:
                     logger.error(f"自动标记用户未读消息时出错: {str(e)}")
 
@@ -1338,15 +1215,6 @@ async def forwarding_message_a2u(update: Update, context: ContextTypes.DEFAULT_T
         if not forum_status:
             logger.warning(f"找不到话题 {topic_id} 对应的用户")
             return
-        
-        # 如果是群组话题，不再跳过，而是使用group_handlers中的实现
-        if forum_status.from_group and forum_status.source_group_id:
-            # 引入group_handlers中的send_admin_reply_to_group_topic函数
-            from app.telegram.group_handlers import forward_message_to_group
-            
-            # 调用群组话题回复处理函数
-            await forward_message_to_group(update, context, forum_status)
-            return
 
         # 处理媒体组消息
         if update.message.media_group_id:
@@ -1356,31 +1224,16 @@ async def forwarding_message_a2u(update: Update, context: ContextTypes.DEFAULT_T
         # 转发普通消息
         await forward_message_to_user(update, context)
         
-        # 自动将该用户的对应来源的未读消息标记为已读
+        # 自动将该用户的未读消息标记为已读
         try:
             # 获取用户ID
             user_id = forum_status.user_id
             
-            # 判断当前消息的来源类型
-            is_from_group = forum_status.from_group
-            source_group_id = forum_status.source_group_id
-                
-            # 根据来源类型查找对应的未读消息
-            if is_from_group:
-                # 如果是群组消息，只标记来自相同群组的未读消息为已读
-                unread_messages = db.query(MessageMap).filter(
-                    MessageMap.user_telegram_id == user_id,
-                    MessageMap.is_unread_topic == True,
-                    MessageMap.is_from_group == True,
-                    MessageMap.source_group_id == source_group_id
-                ).all()
-            else:
-                # 如果是私聊消息，只标记私聊的未读消息为已读
-                unread_messages = db.query(MessageMap).filter(
-                    MessageMap.user_telegram_id == user_id,
-                    MessageMap.is_unread_topic == True,
-                    MessageMap.is_from_group == False
-                ).all()
+            # 私聊消息标记处理
+            unread_messages = db.query(MessageMap).filter(
+                MessageMap.user_telegram_id == user_id,
+                MessageMap.is_unread_topic == True
+            ).all()
                 
             if unread_messages:
                 # 标记所有未读消息为已读
@@ -1403,9 +1256,7 @@ async def forwarding_message_a2u(update: Update, context: ContextTypes.DEFAULT_T
                     
                 # 提交所有更改
                 db.commit()
-                source_type = "群组" if is_from_group else "私聊"
-                source_info = f" ({forum_status.source_group_name})" if is_from_group and forum_status.source_group_name else ""
-                logger.info(f"已自动将用户 {user_id} 的{source_type}{source_info}未读消息({len(unread_messages)}条)标记为已读")
+                logger.info(f"已自动将用户 {user_id} 的私聊未读消息({len(unread_messages)}条)标记为已读")
         except Exception as e:
             logger.error(f"自动标记用户未读消息时出错: {str(e)}")
     except Exception as e:

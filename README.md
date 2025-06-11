@@ -1,111 +1,133 @@
-# Telegram客服系统
+# TelegramBridge - Telegram Two-Way Customer Service Bot
 
-基于[python-telegram-bot](https://docs.python-telegram-bot.org/en/stable/)官方库构建的客服系统，采用单一入口点设计。
+A comprehensive bidirectional customer service system built with Python-Telegram-Bot, designed to efficiently manage customer inquiries through Telegram by connecting users and service agents in real-time.
 
-## 功能特点
+[中文文档](README.zh.md)
 
-- 用户可以通过机器人发送消息，消息会被转发到管理员群组
-- 管理员可以在群组中回复用户消息
-- 支持多种媒体类型的消息转发（图片、视频、文件等）
-- 提供话题管理功能，每个用户自动创建单独的话题
-- 支持广播功能，可以向所有用户发送通知
+## Features
 
-## 系统要求
+- **Bidirectional Communication**: Seamless two-way message forwarding between users and customer service agents
+- **Topic-based Organization**: Automatically organize conversations with users in forum topics
+- **Unread Message System**: Highlight unread messages to ensure no inquiry is missed
+- **Media Support**: Handle various types of media including photos, videos, documents, and more
+- **User Management**: Block/unblock users and mark messages as read with simple actions
+- **Premium User Recognition**: Identify Telegram Premium users automatically
 
-- Python 3.9+
-- python-telegram-bot 20.0+
-- 有效的Telegram Bot Token
-- 管理员群组（需启用话题功能）
+## Requirements
 
-## 安装步骤
+- Python 3.7+
+- A Telegram Bot Token (from [@BotFather](https://t.me/BotFather))
+- A Telegram Supergroup with forum topics enabled
+- Admin rights for the bot in the supergroup
 
-pyinstaller --onefile --add-data "app:app" --hidden-import=dotenv telegram_bot.py
+## Installation
 
-1. 克隆项目并进入目录
+1. Clone the repository
 ```bash
-git clone <repository-url>
-cd python-telegram-bot
+git clone https://github.com/FriesOfficial/TelegramBridge.git
+cd TelegramBridge
 ```
 
-2. 安装依赖
+2. Install dependencies
 ```bash
 pip install -r requirements.txt
 ```
 
-3. 配置环境变量
-创建`.env`文件，添加以下内容：
+3. Create a `.env` file in the project root directory with the following variables:
 ```
-TELEGRAM_TOKEN=your_bot_token
+TELEGRAM_TOKEN=your_bot_token_from_botfather
 TELEGRAM_ADMIN_GROUP_ID=your_admin_group_id
-TELEGRAM_ADMIN_USER_IDS=user_id1,user_id2
+TELEGRAM_ADMIN_USER_IDS=admin1_id,admin2_id
 ```
 
-## 使用方法
+## Configuration
 
-### 启动客服系统
+### Required Environment Variables
 
-使用单一入口点启动整个系统：
+- `TELEGRAM_TOKEN`: Your Telegram Bot token from BotFather
+- `TELEGRAM_ADMIN_GROUP_ID`: Admin group ID (must be a supergroup with forum topics enabled)
+- `TELEGRAM_ADMIN_USER_IDS`: Admin user IDs, separated by commas
+
+### Optional Environment Variables
+
+- `TELEGRAM_APP_NAME`: Application name (default: "Customer Service System")
+- `TELEGRAM_WELCOME_MESSAGE`: Welcome message for users
+- `TELEGRAM_REQUEST_TIMEOUT`: API request timeout in seconds (default: 30)
+- `TELEGRAM_CONNECTION_POOL_SIZE`: Connection pool size (default: 100)
+
+## Usage
+
+### Starting the Bot
 
 ```bash
 python telegram_bot.py
 ```
 
-### 命令行参数
+### Additional Command Line Options
 
-- `--debug`: 启用调试模式，显示更详细的日志
-- `--db-only`: 仅初始化数据库，不启动机器人
+- `--debug`: Enable debug mode for more detailed logs
+- `--env`: Specify a custom .env file path
 
-### 管理员命令
+### Admin Commands
 
-在管理员群组中可用的命令：
+- `/start`: Initialize the bot
+- `/help`: Show help information
+- `/reload_config`: Reload configuration from .env file
 
-- `/clear`: 清除当前话题
-- `/broadcast`: 向所有用户广播消息 (需回复要广播的消息)
+### User Interaction
 
-### 用户命令
+1. Users start a conversation with the bot by sending any message
+2. Messages are forwarded to the admin group in a dedicated topic for each user
+3. Admins reply in the topic, and responses are forwarded back to the user
+4. Unread messages appear in a separate system topic until marked as read
 
-用户可以使用的命令：
+## Database
 
-- `/start`: 开始使用客服系统
-- `/help`: 显示帮助信息
+The system uses SQLAlchemy with SQLite by default. Tables are created automatically when the bot starts. The database files are stored in the project directory.
 
-## 数据库结构
-
-系统使用SQLite数据库存储以下信息：
-
-- 用户信息
-- 消息映射（用户消息和管理员消息的对应关系）
-- 话题状态
-- 媒体组消息
-
-## 项目结构
+## Directory Structure
 
 ```
 python-telegram-bot/
+├── telegram_bot.py       # Main entry point
 ├── app/
-│   ├── database/           # 数据库模块
-│   ├── models/             # 数据模型
-│   ├── config/             # 配置模块
-│   └── telegram/           # Telegram机器人相关模块
-├── assets/                 # 资源文件
-│   └── imgs/               # 图片资源
-├── telegram_bot.py         # 单一入口点
-└── requirements.txt        # 依赖文件
+│   ├── config/           # Configuration files
+│   ├── database/         # Database models and connection
+│   ├── models/           # Data models
+│   ├── schemas/          # Pydantic schemas
+│   └── telegram/         # Telegram bot logic
+├── assets/
+│   └── imgs/             # Image assets
+└── .env                  # Environment variables
 ```
 
-## 故障排除
+## Troubleshooting
 
-如果遇到"terminated by other getUpdates request"错误，表示有多个Bot实例同时运行。请确保只有一个实例在运行：
+### Common Issues
 
-```bash
-# 检查是否有多个实例在运行
-ps aux | grep telegram_bot.py
+1. **"Terminated by other getUpdates request" error**
+   - Cause: Multiple bot instances running simultaneously
+   - Solution: Ensure only one instance is running with `ps aux | grep telegram_bot.py`
+   - If multiple instances exist, stop all with `pkill -f telegram_bot.py` and restart
 
-# 如需停止所有实例
-pkill -f telegram_bot.py
-```
+2. **Network Timeout Issues**
+   - Cause: Unstable network connection or Telegram API unavailability
+   - Solution:
+     - Check your network connection: `curl api.telegram.org`
+     - Increase timeout: Set `TELEGRAM_REQUEST_TIMEOUT=60`
+     - Configure a proxy: Set `HTTPS_PROXY=http://your-proxy:port`
 
-## 许可证
+3. **Permission Issues**
+   - Cause: Bot lacks required permissions in the admin group
+   - Solution:
+     - Ensure the bot is an administrator in the group
+     - Verify the bot has permission to manage topics
 
-本项目采用MIT许可证。
+## License
+
+[MIT License](LICENSE)
+
+## Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request.
  
